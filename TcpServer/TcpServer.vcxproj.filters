@@ -15,15 +15,18 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="client.cpp">
+    <ClCompile Include="server.cpp">
       <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Message.hpp">
+      <Filter>Header Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="EsayTcpClient.hpp">
+    <ClInclude Include="TcpServer.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="Message.hpp">
+    <ClInclude Include="CELLTimestamp.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

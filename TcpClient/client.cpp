@@ -6,7 +6,7 @@
 
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
-#include "EsayTcpClient.hpp"
+#include "TcpClient.hpp"
 #include <thread>
 
 // number of threads

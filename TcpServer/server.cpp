@@ -7,7 +7,7 @@
 
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 
-#include "EasyTcpServer.hpp"
+#include "TcpServer.hpp"
 
 int main() {
 
@@ -32,6 +32,8 @@ int main() {
     server.closeSock();
 
     std::cout << "server closed" << std::endl;
+    std::cout << "Press Enter any key to exit" << std::endl;
+    getchar();
     //Sleep(1000);
     return 0;
 }

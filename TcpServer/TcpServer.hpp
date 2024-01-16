@@ -5,7 +5,7 @@
 
 #ifdef _WIN32				
 // in Unix-like environment, the maximum size of fd_set is 1024
-// in windows environment, the maximum size of fd_set is 64
+// in windows environment, the maximum size of fd_set is 64, in WinSock2.h
 // to ensure the consitentcy for cross-platform development, 
 // we can increase its size by refining this macro 
 #	define FD_SETSIZE 1024 
@@ -34,6 +34,7 @@
 #include <functional>
 #include <thread>
 #include <atomic>
+#include <map>
 #include "Message.hpp"
 #include "CELLTimestamp.hpp"
 
@@ -100,10 +101,10 @@ private:
 
 };
 
-class CellServer {
+class ChildServer {
 	public:
-		CellServer(SOCKET sock = INVALID_SOCKET) :_sock{ sock }, 
-												_clients_list{},
+		ChildServer(SOCKET sock = INVALID_SOCKET) :_sock{ sock }, 
+												_clients{},
 												_clients_Buffer{},
 												_mutex{},
 												_szRecv{},
@@ -124,38 +125,50 @@ class CellServer {
 
 #		ifdef _WIN32
 			// close all client sockets
-			for (int n = 0; n < (int)_clients_list.size(); n++) {
-				closesocket(_clients_list[n]->getSockfd());
+			for (auto iter : _clients) {
+				closesocket(iter.second->getSockfd());
 				// TODO: need to check if it is not nullptr and delete successfully
-				delete _clients_list[n];
+				delete iter.second;
 			}
 			// terminates use of the Winsock 2 DLL (Ws2_32.dll)
+			closesocket(_sock);
 			WSACleanup();
 #		else
-			for (int n = 0; n < (int)_clients_list.size(); n++) {
-				close(_clients_list[n]->getSockfd());
-				delete _clients_list[n];
+			for (auto iter : _clients) {
+				close(iter.second->getSockfd());
+				delete iter.second;
 			}
+			close(_sock);
 #		endif
-			_clients_list.clear();
+			_clients.clear();
 		}
 
-		// listen client message
+		// backup previous file descriptor set to improve performance
+		fd_set _fdRead_pre;
+		bool _clients_change;
+
+		// used in linux environment
+		SOCKET _maxSock;
+
+		// keep running to listen client message
 		void listenClient() {
+			_clients_change = true;
 			while (isRun()) {
 				// check if buffer queue contain any connected clients
 				if (_clients_Buffer.size() > 0) {
+					// lock guard will release lock automatically when reach the end of scope to deconstruct itself
 					std::lock_guard<std::mutex> _lock(_mutex);
 
 					for (auto client : _clients_Buffer) {
-						_clients_list.push_back(client);
+						_clients[client->getSockfd()] = client;
 					}
 				
 					_clients_Buffer.clear();
+					_clients_change = true;
 				}
 
-				if (_clients_list.empty()) {
-					// when no client connected, sleep child thread
+				if (_clients.empty()) {
+					// when no client connected, sleep child server
 					std::chrono::milliseconds t(1);
 					std::this_thread::sleep_for(t);
 					continue;
@@ -171,21 +184,33 @@ class CellServer {
 				FD_ZERO(&fdWrite);
 				FD_ZERO(&fdExp);
 
-				// record the maximum number of fd in all scokets
-				SOCKET maxSock = _clients_list[0] ->getSockfd();
+				// only update file descriptor set when client connect or exit
+				if (_clients_change) {
+					// record the maximum number of fd in all scokets
+					_maxSock = _clients.begin()->second->getSockfd();
 				
-				for (int n = 0; n < (int)_clients_list.size(); n++) {
-					FD_SET(_clients_list[n]->getSockfd(), &fdRead);
-					if (maxSock < _clients_list[n]->getSockfd()) maxSock = _clients_list[n]->getSockfd();
+					for (auto iter : _clients) {
+						FD_SET(iter.second->getSockfd(), &fdRead);
+						if (_maxSock < iter.second->getSockfd()) _maxSock = iter.second->getSockfd();
+					}
+					
+					// back up an new file descriptor set
+					memcpy(&_fdRead_pre, &fdRead, sizeof(fd_set));
+					_clients_change = false;
 				}
-				
-				// fisrt arg: ignore, the nfds parameter is included only for compatibility with Berkeley sockets.
+				else {
+					memcpy(&fdRead, &_fdRead_pre, sizeof(fd_set));
+				}
+				 
+				// fisrt arg: ignore, the nfds parameter is included only for compatibility with Berkeley sockets, to present to largest file descriptor number.
 				// last arg is timeout: The maximum time for select to wait for checking status of sockets
 				// allow a program to monitor multiple file descriptors, waiting until one or more of the file descriptors become "ready" for some class of I/O operation
 				// when select find status of sockets change, it would clear all sockets and reload the sockets which has changed the status
 				timeval t = { 1, 0 };
 
-				int ret = select(maxSock + 1, &fdRead, &fdWrite, &fdExp, &t);
+				int ret = select(_maxSock + 1, &fdRead, &fdWrite, &fdExp, &t);
+
+				if (ret == 0) continue;
 
 				// error happens when return value less than 0
 				if (ret < 0) {
@@ -196,26 +221,48 @@ class CellServer {
 					return;
 				}
 
+#				ifdef _WIN32
 				// loop through all client sockets to process command
-				for (int n = 0; n < (int)_clients_list.size(); n++) {
-					if (FD_ISSET(_clients_list[n]->getSockfd(), &fdRead)) {
-						// connected client socket has been closed
-						if (receiveClientMessage(_clients_list[n]) == -1) {
-							// find cloesd client socket and remove
-							std::cout << "Client " << _clients_list[n]->getSockfd() << " exit" << std::endl;
-							auto iter = _clients_list.begin() + n;
-							//auto iter = _clients_list.begin() + n;
-							if (iter != _clients_list.end()) {
-								if (_netEvent) _netEvent->OnExit(_clients_list[n]);
+				for (int n = 0; n < fdRead.fd_count; n++) {
+					// fd array is a socket array in windows, while in unix it is a bitmask
+					auto iter = _clients.find(fdRead.fd_array[n]);
 
-								delete _clients_list[n];
-								// TODO: problem, should close socket before remove it 
-								_clients_list.erase(iter);
-								break;
+					if (FD_ISSET(iter->second->getSockfd(), &fdRead)) {
+						if (iter != _clients.end()) {
+							if (receiveClientMessage(iter->second) == -1) {
+								if (_netEvent) _netEvent->OnExit(iter -> second);
+								std::cout << "Client " << iter->second->getSockfd() << " exit" << std::endl;
+
+								_clients_change = true;
+								_clients.erase(iter->first);
 							}
+						}
+						else {
+							std::cout << "error, if (iter != _clients.end())" << std::endl;
 						}
 					}
 				}
+
+#				else
+				std::vector<ClientSocket*> temp;
+				for (auto iter : _clients) {
+					if (FD_ISSET(iter.second->getSockfd(), &fdRead)) {
+						if (receiveClientMessage(iter.second) == -1) {
+							if (_netEvent) _netEvent->OnExit(iter.second);
+							std::cout << "Client " << iter.second->getSockfd() << " exit" << std::endl;
+
+							_clients_change = true;
+							temp.push_back(iter.second);
+						}
+					}
+				}
+
+				for (auto client : temp) {
+					_clients.erase(client->sockfd());
+					delete client;
+				}
+				
+# 				endif
 				//std::cout << "Server is idle and able to deal with other tasks" << std::endl;
 			}
 		}
@@ -322,18 +369,18 @@ class CellServer {
 		void start() {
 			// TODO: review this function
 			// start an thread for child server, to listen and process client message
-			_pThread = std::thread(std::mem_fun(&CellServer::listenClient), this);
+			_pThread = std::thread(std::mem_fun(&ChildServer::listenClient), this);
 		}
 
 		size_t getCount() {
-			return _clients_list.size() + _clients_Buffer.size();
+			return _clients.size() + _clients_Buffer.size();
 		}
 
 		void setMainServer(INetEvent* event) {
 			_netEvent = event;
 		}
 
-		~CellServer() {
+		~ChildServer() {
 			closeSock();
 		}
 
@@ -344,7 +391,7 @@ class CellServer {
 		// all client sockets connected with server, 
 		// we allocate its memory on heap to avoid stack overflow
 		// since each size of object is large
-		std::vector<ClientSocket*> _clients_list;
+		std::map<SOCKET, ClientSocket*> _clients;
 
 		// buffer queue to store clients sent from main thread
 		std::vector<ClientSocket*> _clients_Buffer;
@@ -467,7 +514,7 @@ public:
 	// accept client connection
 	SOCKET acceptClient() {
 		// 4. wait until accept an new client connection
-		  // The accept function fills this structure with the address information of the client that is connecting.
+		// The accept function fills this structure with the address information of the client that is connecting.
 		sockaddr_in clientAddr = {};
 
 		// After the function call, it will be updated with the actual size of the client's address information.
@@ -487,7 +534,7 @@ public:
 		else {
 			// send message to all client that there is an new client connected to server
 			NewUserJoin client;
-			client.cSocket = cSock;
+			client.cSocket = cSock; 
 			//broadcastMessage(&client);
 
 			ClientSocket* newCLient = new ClientSocket(cSock);
@@ -550,7 +597,7 @@ public:
 		FD_SET(_sock, &fdWrite);
 		FD_SET(_sock, &fdExp);
 
-		// setup time stamp to listen client connection, which means, 
+		// setup time stamp to listen client connection, that is, 
 		// our server is non-blocking, and can process other request while listening to client socket
 		// set time stamp to 10 millisecond to check if there are any connections from client
 		timeval t = { 0, 10 };
@@ -560,7 +607,7 @@ public:
 		// allow a program to monitor multiple file descriptors, waiting until one or more of the file descriptors become "ready" for some class of I/O operation
 		// when select find status of sockets change, it would clear all sockets and reload the sockets which has changed the status
 
-		// drawback of select function: maximum size of fdset is 64, which means, there can be at most 64 clients connected to server
+		// drawback of select function: maximum size of fdset is 64, which means, there can be at most 64 clients connected to server, we already reset the size of fdset to 1024
 
 		int ret = select(_sock + 1, &fdRead, &fdWrite, &fdExp, &t);
 
@@ -592,14 +639,14 @@ public:
 		// TODO: make sure sock is initialized
 
 		for (int n = 0; n < childCount; n++) {
-			auto cServer = new CellServer(_sock);
+			auto cServer = new ChildServer(_sock);
 			_child_servers.push_back(cServer);
 			cServer->setMainServer(this);
 			cServer -> start();
 		}
 	}
 
-	// close socket
+	// shutdown child server
 	void closeSock() {
 		if (_sock == INVALID_SOCKET) {
 			return;
@@ -676,7 +723,7 @@ public:
 		_clientCount++;
 	}
 
-	// get rid of the socket of exited client
+	// delete the socket of exited client
 	virtual void OnExit(ClientSocket* clientSock) {
 		auto iter = _clients_list.end();
 
@@ -699,12 +746,11 @@ private:
 	// server socket
 	SOCKET _sock;
 
-	// all client sockets connected with server, 
-	// this clients list is for message broadcast
+	// all client sockets connected with server, this clients list can be used for message broadcast
 	std::vector<ClientSocket*> _clients_list;
 
 	// child threads to process client messages
-	std::vector<CellServer*> _child_servers;
+	std::vector<ChildServer*> _child_servers;
 
 	CELLTimestamp _time;
 
