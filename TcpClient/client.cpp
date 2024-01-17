@@ -7,7 +7,9 @@
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
 #include "TcpClient.hpp"
+#include "CELLTimestamp.hpp"
 #include <thread>
+#include <atomic>
 
 // number of threads
 const int tCount = 4;
@@ -18,19 +20,31 @@ const int cCount = 1000;
 // clients array, it needs to be global so that each client in child thread can access it
 EasyTcpClient* clients[cCount];
 
+std::atomic_int sendCount = 0;
+std::atomic_int readyCount = 0;
+
 void childThread(int id) {
 	if (!isRun) return;
 
 	int begin = (id - 1) * (cCount / tCount);
 	int end = (id) * (cCount / tCount);
 
+	// initialize client
 	for (int n = begin; n < end; n++) {
 		clients[n] = new EasyTcpClient();
 	}
 
+	// connect server
 	for (int n = begin; n < end; n++) {
 		clients[n]->initSocket();
 		clients[n]->connectServer("127.0.0.1", 4567);
+	}
+
+	// wait until all clients connect to server
+	readyCount++;
+	while (readyCount < tCount) {
+		std::chrono::milliseconds t(10);
+		std::this_thread::sleep_for(t);
 	}
 
 	Login login;
@@ -39,11 +53,13 @@ void childThread(int id) {
 
 	while (isRun) { 
 		for (int n = begin; n < end; n++) {
+			// keep sending message to server for pressure test
+			if (clients[n]->sendMessage(&login, sizeof(login)) != SOCKET_ERROR) {
+				sendCount++;
+			};
+
 			// listen message from server
 			//clients[n]->listenServer();
-
-			// keep sending message to server for pressure test
-			clients[n]->sendMessage(&login);
 		}
 	}
 
@@ -68,10 +84,18 @@ int main()
 		t1.detach();
 	}
 
+	CELLTimestamp timer;
+
 	while (isRun) {
-		std::chrono::milliseconds t(100);
-		std::this_thread::sleep_for(t);
-		continue;
+		auto t = timer.getElapsedSecond();
+		
+		if (t >= 1.0) {
+			std::cout << tCount << " thread," << cCount <<" clients" << ",sending " << (int)(sendCount/t) << " messages in " << t << "s" << std::endl;
+			sendCount = 0;
+			timer.update();
+		}
+
+		Sleep(1);
 	}
 
 	//std::cout << count << std::endl;

@@ -79,7 +79,7 @@ private:
 	SOCKET _sockfd;
 
 	// second buffer to store data after we receive it from the buffer inside the OS
-	char _szMsgBuf[RECV_BUFF_SIZE * 10];
+	char _szMsgBuf[RECV_BUFF_SIZE * 5];
 
 	// offset pointer which points to the end a sequence of messages received from _szRecv
 	int _offset;
@@ -94,7 +94,8 @@ public:
 	// client exits server
 	virtual void OnJoin(ClientSocket* clientSock) = 0;
 	virtual void OnExit(ClientSocket* clientSock) = 0;
-	virtual void OnRecvMsg() = 0;
+	virtual void OnNetMsg(ClientSocket* clientSock, DataHeader* header) = 0;
+	virtual void OnNetRecv(ClientSocket* clientSock) = 0;
 	~INetEvent() = default;
 
 private:
@@ -107,7 +108,6 @@ class ChildServer {
 												_clients{},
 												_clients_Buffer{},
 												_mutex{},
-												_szRecv{},
 												_pThread{}, 
 												_netEvent{ nullptr }
 		{}
@@ -174,15 +174,15 @@ class ChildServer {
 					continue;
 				}
 
-				// fd_set: to place sockets into a "set" for various purposes, such as testing a given socket for readability using the readfds parameter of the select function
+				// fd_set: a struct which can be placed sockets into a "set" for various purposes, such as testing a given socket for readability using the readfds parameter of the select function
 				fd_set fdRead;
-				fd_set fdWrite;
-				fd_set fdExp;
+				//fd_set fdWrite;
+				//fd_set fdExp;
 
 				// reset the count of each set to zero
 				FD_ZERO(&fdRead);
-				FD_ZERO(&fdWrite);
-				FD_ZERO(&fdExp);
+				//FD_ZERO(&fdWrite);
+				//FD_ZERO(&fdExp);
 
 				// only update file descriptor set when client connect or exit
 				if (_clients_change) {
@@ -208,7 +208,7 @@ class ChildServer {
 				// when select find status of sockets change, it would clear all sockets and reload the sockets which has changed the status
 				timeval t = { 1, 0 };
 
-				int ret = select(_maxSock + 1, &fdRead, &fdWrite, &fdExp, &t);
+				int ret = select(_maxSock + 1, &fdRead, nullptr, nullptr, &t);
 
 				if (ret == 0) continue;
 
@@ -229,7 +229,7 @@ class ChildServer {
 
 					if (FD_ISSET(iter->second->getSockfd(), &fdRead)) {
 						if (iter != _clients.end()) {
-							if (receiveClientMessage(iter->second) == -1) {
+							if (RecvData(iter->second) == -1) {
 								if (_netEvent) _netEvent->OnExit(iter -> second);
 								std::cout << "Client " << iter->second->getSockfd() << " exit" << std::endl;
 
@@ -247,7 +247,7 @@ class ChildServer {
 				std::vector<ClientSocket*> temp;
 				for (auto iter : _clients) {
 					if (FD_ISSET(iter.second->getSockfd(), &fdRead)) {
-						if (receiveClientMessage(iter.second) == -1) {
+						if (RecvData(iter.second) == -1) {
 							if (_netEvent) _netEvent->OnExit(iter.second);
 							std::cout << "Client " << iter.second->getSockfd() << " exit" << std::endl;
 
@@ -261,27 +261,34 @@ class ChildServer {
 					_clients.erase(client->sockfd());
 					delete client;
 				}
-				
 # 				endif
 				//std::cout << "Server is idle and able to deal with other tasks" << std::endl;
 			}
 		}
 
 		// receive client message, solve message concatenation
-		int receiveClientMessage(ClientSocket* client) {
+		int RecvData(ClientSocket* client) {
 			// 5. keeping reading message from clients
-			//we only read header info from the incoming message
-			int nLen = (int)recv(client->getSockfd(), _szRecv, RECV_BUFF_SIZE, 0);
+			// we only read header info from the incoming message
+			
+			// pointer points to the client buffer
+			char* _szRecv = client->getMsgBuf() + client->getOffset();
 
-			/*std::cout << "nLen = " << nLen << std::endl;*/
+			// receive messages from clients and store into buffer
+			int nLen = (int)recv(client->getSockfd(), _szRecv, (RECV_BUFF_SIZE * 5) - client->getOffset(), 0);
+			
+			// increase number of received packages
+			_netEvent->OnNetRecv(client);
+
+			// std::cout << "nLen = " << nLen << std::endl;
 			if (nLen <= 0) {
 				// connection has closed
-				std::cout << "Client " << client->getSockfd() << " closed" << std::endl;
+				//std::cout << "Client " << client->getSockfd() << " closed" << std::endl;
 				return -1;
 			}
 
 			// copy all messages from the received buffer to second buffer 
-			memcpy(client->getMsgBuf() + client->getOffset(), _szRecv, nLen);
+			// memcpy(client->getMsgBuf() + client->getOffset(), _szRecv, nLen);
 
 			// increase offset so that the next message will be moved to the end of the previous message
 			// TODO: reconsider the value to set
@@ -299,8 +306,8 @@ class ChildServer {
 					// the length of all following messages
 					int shiftLen = client->getOffset() - header->length;
 
-					// we dont need to receive the message body since 
-					processClientMessage(client, header);
+					// response with client message
+					OnNetMsg(client, header);
 
 					// successfully processs the first message
 					// shift all following messages to the beginning of second buffer
@@ -309,8 +316,7 @@ class ChildServer {
 					client->setOffset(shiftLen);
 				}
 				else {
-					// the remaining message is not complete, wait for socket to receive the
-					// them until we get a full next message
+					// the remaining message is not complete, wait until we get a full next message
 					break;
 				}
 			}
@@ -320,42 +326,9 @@ class ChildServer {
 
 		// response client message, there can be different ways of processing messages in different kinds of server
 		// we use virutal to for inheritance
-		virtual void processClientMessage(ClientSocket* client, DataHeader* header) {
+		virtual void OnNetMsg(ClientSocket* client, DataHeader* header) {
 			// increase the count of received message
-			_netEvent->OnRecvMsg();
-			
-			switch (header->cmd) {
-			case CMD_LOGIN: {
-				// modify pointer to points to the member of subclass, since the member of parent class
-				// would be initialized before those of subclass
-				// at the same time, reduce the amount of data we need to read
-				Login* login = (Login*)header;
-				//std::cout << "Received message from client: " << allCommands[login->cmd] << " message length: " << login->length << std::endl;
-				//std::cout << "User: " << login->userName << " Password: " << login->password << std::endl;
-
-				// TODO: when user keep sending message to server, server will crash if it try to response to client
-				// LoginRet ret;
-				// client->sendMessage(&ret);
-				// TODO: needs account validation
-				break;
-			}
-			case CMD_LOGOUT: {
-				Logout* logout = (Logout*)header;
-				//std::cout << "Received message from client: " << allCommands[logout->cmd] << " message length: " << logout->length << std::endl;
-				//std::cout << "User: " << logout->userName << std::endl;
-				//// TODO: needs account validation
-				//LogoutRet ret;
-				//client->sendMessage(&ret);
-				break;
-			}
-			default: {
-				std::cout << "Undefined message received from " << client -> getSockfd() << std::endl;
-				header->length = 0;
-				header->cmd = CMD_ERROR;
-				client->sendMessage(header);
-				break;
-			}
-			}
+			_netEvent->OnNetMsg(client, header);
 		}
 	
 		// add client from main thread into the buffer queue of child thread
@@ -399,9 +372,6 @@ class ChildServer {
 		// mutex for accessing buffer queue
 		std::mutex _mutex;
 
-		// buffer for receiving data, this is still a fixed length buffer
-		char _szRecv[RECV_BUFF_SIZE];
-
 		// thread of child server
 		std::thread _pThread;
 
@@ -413,7 +383,7 @@ class ChildServer {
 class EasyTcpServer : public INetEvent
 {
 public:
-	EasyTcpServer() :_sock{ INVALID_SOCKET }, _clients_list{}, _time {}, _recvCount{ 0 }, _clientCount{ 0 }, _child_servers{} {}
+	EasyTcpServer() :_sock{ INVALID_SOCKET }, _clients_list{}, _time{}, _recvCount{ 0 }, _msgCount{ 0 }, _clientCount { 0 }, _child_servers{} {}
 
 	// initialize server socket
 	SOCKET initSocket() {
@@ -679,7 +649,7 @@ public:
 		return _sock != INVALID_SOCKET;
 	}
 
-	// calculate number of messages received per second
+	// calculate number of packages/messages received per second
 	void recvMsgRate() {
 		auto t = _time.getElapsedSecond();
 
@@ -687,8 +657,9 @@ public:
 			std::cout << "Threads: " << _child_servers.size() << " - ";
 			std::cout << "Clients: " << _clientCount << " - ";
 			std::cout << std::fixed << std::setprecision(6) << t << " second, server socket <" << _sock;
-			std::cout << "> receive " << (int)(_recvCount / t) << " packets" << std::endl;
+			std::cout << "> receive " << (int)(_recvCount / t) << " packets, " << int(_msgCount / t)<< " messages" << std::endl;
 			
+			_msgCount = 0;
 			_recvCount = 0;
 			_time.update();
 		}
@@ -712,8 +683,8 @@ public:
 		}
 	}
 
-	// increase number of received message
-	virtual void OnRecvMsg() {
+	// increase number of received packages
+	virtual void OnNetMsg(ClientSocket* clientSock, DataHeader* header) {
 		_recvCount++;
 	}
 
@@ -742,20 +713,27 @@ public:
 		closeSock();
 	}
 
-private:
-	// server socket
-	SOCKET _sock;
+protected:
+	// number of received packages
+	std::atomic<int> _recvCount;
+	
+	// number of connected clients 
+	std::atomic<int> _clientCount;
+
+	// number of received messages
+	std::atomic<int> _msgCount;
 
 	// all client sockets connected with server, this clients list can be used for message broadcast
 	std::vector<ClientSocket*> _clients_list;
+
+private:
+	// server socket
+	SOCKET _sock;
 
 	// child threads to process client messages
 	std::vector<ChildServer*> _child_servers;
 
 	CELLTimestamp _time;
-
-	std::atomic<int> _recvCount;
-	std::atomic<int> _clientCount;
 };
 
 bool isRun = true;

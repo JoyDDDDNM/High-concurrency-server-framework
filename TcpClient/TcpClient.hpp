@@ -28,7 +28,7 @@
 class EasyTcpClient
 {
 public:
-	EasyTcpClient() :_sock{ INVALID_SOCKET }, _szRecv{ {} }, _szMsgBuf{ {} }, _offset{0} {}
+	EasyTcpClient() :_sock{ INVALID_SOCKET }, _szMsgBuf{ {} }, _offset{0} {}
 
 	// initialize socket of client to connect server
 	int initSocket() {
@@ -113,7 +113,7 @@ public:
 		FD_ZERO(&fdRead);
 		FD_SET(_sock, &fdRead);
 
-		timeval t = { 1, 0 };
+		timeval t = { 0, 0 };
 
 		// client is blocked since the socket of server side is closed
 		int ret = select(_sock + 1, &fdRead, 0, 0, &t);
@@ -137,16 +137,20 @@ public:
 
 	// receive message from server, solve message concatenation
 	int receiveServerMessage(SOCKET _cSock) {
-		// 5. keeping reading message from server
+		// keeping reading message from server
 		//we only read header info from the incoming message
-		int nLen = (int)recv(_cSock, _szRecv, RECV_BUFF_SIZE, 0);
+
+		// pointers points to client buffer (response from server)
+		char* _szRecv = _szMsgBuf + _offset;
+
+		int nLen = (int)recv(_cSock, _szRecv, (RECV_BUFF_SIZE * 5) - _offset, 0);
 		if (nLen <= 0) {
 			// connection has closed
 			return -1;
 		}
 
-		// copy all messages from the received buffer to second buffer 
-		memcpy(_szMsgBuf + _offset, _szRecv, nLen);
+		// copy a ll messages from the received buffer to second buffer 
+		// memcpy(_szMsgBuf + _offset, _szRecv, nLen);
 
 		// increase offset so that the next message will be moved to the end of the previous message
 		_offset += nLen;
@@ -226,11 +230,11 @@ public:
 	}
 
 	// when user type message, send message to server
-	int sendMessage(DataHeader* header) {
+	int sendMessage(DataHeader* header, int messageLen) {
 		int ret = SOCKET_ERROR;
 		
 		if (isRun() && header) {
-			ret = send(_sock, (const char*)header, header -> length, 0);
+			ret = send(_sock, (const char*)header, messageLen, 0);
 
 			// server is close, needs to close client socket
 			if (ret == SOCKET_ERROR) closeSock();
@@ -247,10 +251,10 @@ private:
 	SOCKET _sock;
 
 	// buffer for receiving data, this is still a fixed length buffer
-	char _szRecv[RECV_BUFF_SIZE];
+	// char _szRecv[RECV_BUFF_SIZE];
 
 	// second buffer to store data after we receive it from the buffer inside the OS
-	char _szMsgBuf[RECV_BUFF_SIZE * 10];
+	char _szMsgBuf[RECV_BUFF_SIZE * 5];
 
 	// offset pointer which points to the end a sequence of messages received from _szRecv
 	int _offset;
