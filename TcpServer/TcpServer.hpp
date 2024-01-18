@@ -23,7 +23,8 @@
 
 #ifndef RECV_BUFF_SIZE 
 // base unit of buffer size
-#define RECV_BUFF_SIZE 10240
+#define RECV_BUFF_SIZE 10240 * 5
+#define SEND_BUFF_SIZE RECV_BUFF_SIZE
 #endif
 
 #include <iostream>
@@ -47,10 +48,13 @@ std::vector<std::string> allCommands = { "CMD_LOGIN",
 										
 class ClientSocket {
 public:
-	ClientSocket(SOCKET sockfd = INVALID_SOCKET) :_sockfd{ sockfd }, _szMsgBuf{ {} }, _offset{ 0 } {}
+	ClientSocket(SOCKET sockfd = INVALID_SOCKET) :_sockfd{ sockfd }, _szMsgBuf{ {} }, _offset{ 0 }, _lastSendPos{ 0 } {
+		memset(_szMsgBuf, 0, RECV_BUFF_SIZE);
+		memset(_szSendBuf, 0, SEND_BUFF_SIZE);
+	}
 
 	SOCKET getSockfd() {
-		return _sockfd;
+		return _sockfd; 
 	}
 
 	char* getMsgBuf() {
@@ -58,32 +62,68 @@ public:
 	}
 
 	int getOffset() {
-		return _offset;
+		return _offset; 
 	}
 
 	void setOffset(int pos) {
 		_offset = pos;
 	} 
 
-	// send message to client
+	// send messages to clients
 	int sendMessage(DataHeader* header) {
-		if (header) {
-			return send(_sockfd, (const char*)header, header->length, 0);
+		int ret = SOCKET_ERROR;
+
+		int nSendLen = header->length;
+		const char* pSendData = (const char*)header;
+		
+		while (true) {
+			// reach buffer size limit
+			if (_lastSendPos + nSendLen >= SEND_BUFF_SIZE) {
+				// count number of messages we can send
+				int nCopyLen = SEND_BUFF_SIZE - _lastSendPos;
+			
+				// only copy certain amount of next message to fill the buffer
+				memcpy(_szSendBuf + _lastSendPos, pSendData, nCopyLen);
+				
+				// increase pointer 
+				pSendData += nCopyLen;
+
+				// decrease len of next message to be copied into buffer
+				nSendLen -= nCopyLen;
+
+				// send messages when receive large enough messages
+				ret = send(_sockfd, _szSendBuf, SEND_BUFF_SIZE, 0);
+
+				// reset offset
+				_lastSendPos = 0;
+
+				if (ret == SOCKET_ERROR) return ret;
+			}
+			else {
+				memcpy(_szSendBuf + _lastSendPos, pSendData, nSendLen);
+				_lastSendPos += nSendLen;
+				break;
+			}
 		}
 
-		return SOCKET_ERROR;
+		return ret;
 	}
 
 private:
 	// socket fd, which will be put into selcet function
 	SOCKET _sockfd;
 
-	// second buffer to store data after we receive it from the buffer inside the OS
-	char _szMsgBuf[RECV_BUFF_SIZE * 5];
+	// buffer which stores data after we receive it from the buffer inside OS kernel
+	char _szMsgBuf[RECV_BUFF_SIZE];
 
 	// offset pointer which points to the end a sequence of messages received from _szRecv
 	int _offset;
 
+	// buffer which stores messages which would be sent to clients later
+	char _szSendBuf[SEND_BUFF_SIZE];
+	
+	// 
+	int _lastSendPos;
 };
 
 class INetEvent
@@ -104,13 +144,7 @@ private:
 
 class ChildServer {
 	public:
-		ChildServer(SOCKET sock = INVALID_SOCKET) :_sock{ sock }, 
-												_clients{},
-												_clients_Buffer{},
-												_mutex{},
-												_pThread{}, 
-												_netEvent{ nullptr }
-		{}
+		ChildServer(SOCKET sock = INVALID_SOCKET) :_sock{ sock }, _clients{}, _clients_Buffer{}, _mutex{}, _pThread{}, _netEvent{ nullptr } {}
 
 		// check if socket is creaBted
 		bool isRun() {
@@ -275,20 +309,16 @@ class ChildServer {
 			char* _szRecv = client->getMsgBuf() + client->getOffset();
 
 			// receive messages from clients and store into buffer
-			int nLen = (int)recv(client->getSockfd(), _szRecv, (RECV_BUFF_SIZE * 5) - client->getOffset(), 0);
+			int nLen = (int)recv(client->getSockfd(), _szRecv, (RECV_BUFF_SIZE) - client->getOffset(), 0);
 			
 			// increase number of received packages
 			_netEvent->OnNetRecv(client);
 
-			// std::cout << "nLen = " << nLen << std::endl;
 			if (nLen <= 0) {
 				// connection has closed
 				//std::cout << "Client " << client->getSockfd() << " closed" << std::endl;
 				return -1;
 			}
-
-			// copy all messages from the received buffer to second buffer 
-			// memcpy(client->getMsgBuf() + client->getOffset(), _szRecv, nLen);
 
 			// increase offset so that the next message will be moved to the end of the previous message
 			// TODO: reconsider the value to set
@@ -306,11 +336,11 @@ class ChildServer {
 					// the length of all following messages
 					int shiftLen = client->getOffset() - header->length;
 
-					// response with client message
+					// get a complete message and response with client 
 					OnNetMsg(client, header);
 
 					// successfully processs the first message
-					// shift all following messages to the beginning of second buffer
+					// shift all following messages to the beginning of buffer
 					memcpy(client->getMsgBuf(), client->getMsgBuf() + header->length, shiftLen);
 
 					client->setOffset(shiftLen);
@@ -333,10 +363,8 @@ class ChildServer {
 	
 		// add client from main thread into the buffer queue of child thread
 		void addClient(ClientSocket* client) {
-			//_mutex.lock();
 			std::lock_guard<std::mutex> lock(_mutex);
 			_clients_Buffer.push_back(client);
-			//_mutex.unlock();
 		}
 
 		void start() {
@@ -604,9 +632,12 @@ public:
 		//std::cout << "Server is idle and able to deal with other tasks" << std::endl;
 	}
 
-	 //start child server to process client message
+	 // start child server to process client message
 	void Start(int childCount) {
-		// TODO: make sure sock is initialized
+		if (_sock == INVALID_SOCKET) {
+			std::cout << "please initialize server socket before lanuching" << std::endl;
+			return;
+		}
 
 		for (int n = 0; n < childCount; n++) {
 			auto cServer = new ChildServer(_sock);
@@ -619,6 +650,7 @@ public:
 	// shutdown child server
 	void closeSock() {
 		if (_sock == INVALID_SOCKET) {
+			std::cout << "Server is not running" << std::endl;
 			return;
 		}
 
