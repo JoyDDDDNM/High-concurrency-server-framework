@@ -36,8 +36,10 @@
 #include <thread>
 #include <atomic>
 #include <map>
+
 #include "Message.hpp"
 #include "CELLTimestamp.hpp"
+#include "CELLTask.hpp"
 
 std::vector<std::string> allCommands = { "CMD_LOGIN",
 										"CMD_LOGIN_RESULT",
@@ -45,7 +47,8 @@ std::vector<std::string> allCommands = { "CMD_LOGIN",
 										"CMD_LOGOUT_RESULT",
 										"CMD_NEW_USER_JOIN",
 										"CMD_ERROR" };
-										
+
+// client socket info
 class ClientSocket {
 public:
 	ClientSocket(SOCKET sockfd = INVALID_SOCKET) :_sockfd{ sockfd }, _szMsgBuf{ {} }, _offset{ 0 }, _lastSendPos{ 0 } {
@@ -116,25 +119,27 @@ private:
 	// buffer which stores data after we receive it from the buffer inside OS kernel
 	char _szMsgBuf[RECV_BUFF_SIZE];
 
-	// offset pointer which points to the end a sequence of messages received from _szRecv
+	// offset pointer pointing to the end of messages received from _szRecv
 	int _offset;
 
 	// buffer which stores messages which would be sent to clients later
 	char _szSendBuf[SEND_BUFF_SIZE];
 	
-	// 
+	// offset pointers pointing to the end end of messages received from _szSendBuf
 	int _lastSendPos;
 };
 
-class INetEvent
-{
+class ChildServer;
+
+// network event interface
+class INetEvent {
 public:
 	INetEvent() = default;
 
 	// client exits server
 	virtual void OnJoin(ClientSocket* clientSock) = 0;
 	virtual void OnExit(ClientSocket* clientSock) = 0;
-	virtual void OnNetMsg(ClientSocket* clientSock, DataHeader* header) = 0;
+	virtual void OnNetMsg(ChildServer* pChildServer, ClientSocket* clientSock, DataHeader* header) = 0;
 	virtual void OnNetRecv(ClientSocket* clientSock) = 0;
 	~INetEvent() = default;
 
@@ -142,9 +147,27 @@ private:
 
 };
 
+// network message sending service
+class CellSendMsgToClientTask : public CellTask {
+	public:	
+		CellSendMsgToClientTask(ClientSocket* pClient, DataHeader* pHeader) : _pClient{ pClient }, _pHeader{ pHeader } {}
+
+		virtual void doTask() override {
+			_pClient->sendMessage(_pHeader);
+			delete _pHeader;
+		}
+
+		~CellSendMsgToClientTask() {}
+
+	private:
+		ClientSocket* _pClient;
+		DataHeader* _pHeader;
+};
+
+// network message receive service
 class ChildServer {
 	public:
-		ChildServer(SOCKET sock = INVALID_SOCKET) :_sock{ sock }, _clients{}, _clients_Buffer{}, _mutex{}, _pThread{}, _netEvent{ nullptr } {}
+		ChildServer(SOCKET sock = INVALID_SOCKET) :_sock{ sock }, _clients{}, _clients_Buffer{}, _mutex{}, _thread{}, _pNetEvent{ nullptr } {}
 
 		// check if socket is creaBted
 		bool isRun() {
@@ -177,19 +200,12 @@ class ChildServer {
 			_clients.clear();
 		}
 
-		// backup previous file descriptor set to improve performance
-		fd_set _fdRead_pre;
-		bool _clients_change;
-
-		// used in linux environment
-		SOCKET _maxSock;
-
 		// keep running to listen client message
-		void listenClient() {
+		void OnRun() {
 			_clients_change = true;
 			while (isRun()) {
 				// check if buffer queue contain any connected clients
-				if (_clients_Buffer.size() > 0) {
+				if (!_clients_Buffer.empty()) {
 					// lock guard will release lock automatically when reach the end of scope to deconstruct itself
 					std::lock_guard<std::mutex> _lock(_mutex);
 
@@ -264,7 +280,7 @@ class ChildServer {
 					if (FD_ISSET(iter->second->getSockfd(), &fdRead)) {
 						if (iter != _clients.end()) {
 							if (RecvData(iter->second) == -1) {
-								if (_netEvent) _netEvent->OnExit(iter -> second);
+								if (_pNetEvent) _pNetEvent->OnExit(iter -> second);
 								std::cout << "Client " << iter->second->getSockfd() << " exit" << std::endl;
 
 								_clients_change = true;
@@ -282,7 +298,7 @@ class ChildServer {
 				for (auto iter : _clients) {
 					if (FD_ISSET(iter.second->getSockfd(), &fdRead)) {
 						if (RecvData(iter.second) == -1) {
-							if (_netEvent) _netEvent->OnExit(iter.second);
+							if (_pNetEvent) _pNetEvent->OnExit(iter.second);
 							std::cout << "Client " << iter.second->getSockfd() << " exit" << std::endl;
 
 							_clients_change = true;
@@ -312,7 +328,7 @@ class ChildServer {
 			int nLen = (int)recv(client->getSockfd(), _szRecv, (RECV_BUFF_SIZE) - client->getOffset(), 0);
 			
 			// increase number of received packages
-			_netEvent->OnNetRecv(client);
+			_pNetEvent->OnNetRecv(client);
 
 			if (nLen <= 0) {
 				// connection has closed
@@ -358,7 +374,7 @@ class ChildServer {
 		// we use virutal to for inheritance
 		virtual void OnNetMsg(ClientSocket* client, DataHeader* header) {
 			// increase the count of received message
-			_netEvent->OnNetMsg(client, header);
+			_pNetEvent->OnNetMsg(this, client, header);
 		}
 	
 		// add client from main thread into the buffer queue of child thread
@@ -370,7 +386,11 @@ class ChildServer {
 		void start() {
 			// TODO: review this function
 			// start an thread for child server, to listen and process client message
-			_pThread = std::thread(std::mem_fun(&ChildServer::listenClient), this);
+			_thread = std::thread(std::mem_fun(&ChildServer::OnRun), this);
+			_thread.detach();
+
+			// start task server to reponse messages
+			_taskServer.start();
 		}
 
 		size_t getCount() {
@@ -378,8 +398,14 @@ class ChildServer {
 		}
 
 		void setMainServer(INetEvent* event) {
-			_netEvent = event;
+			_pNetEvent = event;
 		}
+
+		void addSendTask(ClientSocket* clientSock, DataHeader* header) {
+			CellSendMsgToClientTask* task = new CellSendMsgToClientTask(clientSock, header);
+			_taskServer.addTask(task);
+		}
+
 
 		~ChildServer() {
 			closeSock();
@@ -401,11 +427,23 @@ class ChildServer {
 		std::mutex _mutex;
 
 		// thread of child server
-		std::thread _pThread;
+		std::thread _thread;
+
+		// backup previous file descriptor set to improve performance
+		fd_set _fdRead_pre;
+
+		// check if any clients connect or exit
+		bool _clients_change;
+
+		// used in linux environment
+		SOCKET _maxSock;
 
 		// pointer points to main server, which can be used to call onExit() 
 		// to delete the number of connected clients
-		INetEvent* _netEvent;
+		INetEvent* _pNetEvent;
+
+		// subServer for responding messages
+		CellTaskServer _taskServer;
 };
 
 class EasyTcpServer : public INetEvent
@@ -643,7 +681,7 @@ public:
 			auto cServer = new ChildServer(_sock);
 			_child_servers.push_back(cServer);
 			cServer->setMainServer(this);
-			cServer -> start();
+			cServer->start();
 		}
 	}
 
@@ -716,18 +754,22 @@ public:
 	}
 
 	// increase number of received packages
-	virtual void OnNetMsg(ClientSocket* clientSock, DataHeader* header) {
+	virtual void OnNetMsg(ChildServer* pChildServer,ClientSocket* clientSock, DataHeader* header) override {
+		_msgCount++;
+	}
+
+	virtual void OnNetRecv(ClientSocket* clientSock) override {
 		_recvCount++;
 	}
 
 	// new client connect server
-	virtual void OnJoin(ClientSocket* clientSock) {
+	virtual void OnJoin(ClientSocket* clientSock) override {
 		_clients_list.push_back(clientSock);
 		_clientCount++;
 	}
 
 	// delete the socket of exited client
-	virtual void OnExit(ClientSocket* clientSock) {
+	virtual void OnExit(ClientSocket* clientSock) override {
 		auto iter = _clients_list.end();
 
 		for (int n = (int)_clients_list.size() - 1; n >= 0; n--) {
