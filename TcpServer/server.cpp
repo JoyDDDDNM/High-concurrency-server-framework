@@ -7,6 +7,7 @@
 
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 
+#include "Alloc.hpp"
 #include "TcpServer.hpp"
 
 class MySever : public EasyTcpServer {

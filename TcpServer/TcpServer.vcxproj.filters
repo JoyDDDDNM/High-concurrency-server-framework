@@ -21,6 +21,9 @@
     <ClCompile Include="Message.hpp">
       <Filter>Header Files</Filter>
     </ClCompile>
+    <ClCompile Include="Alloc.cpp">
+      <Filter>Resource Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="TcpServer.hpp">
@@ -30,6 +33,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="CELLTask.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Alloc.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MemoryMgr.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
