@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <iostream>
 #include <thread>
+#include <memory>
 #include "Alloc.hpp"
 #include "CELLTimestamp.hpp"
 
@@ -27,16 +28,21 @@ void workFun(int index) {
 }
 
 int main() {
-	thread t[tCount];
-	CELLTimestamp tTime;
+	// thread t[tCount];
+	// CELLTimestamp tTime;
+	// 
+	// for (int n = 0; n < tCount; n++) {
+	// 	t[n] = thread(workFun, n);
+	// 	t[n].join();
+	// }
+	// 
+	// cout << tTime.getElapsedTimeInMilliSec() << endl;
+	// cout << "Hello,main thread." << endl;
+	// getchar();
+	
+	std::shared_ptr<int> ptr = std::make_shared<int>();
+	
+	std::cout << sizeof(ptr) << std::endl;
 
-	for (int n = 0; n < tCount; n++) {
-		t[n] = thread(workFun, n);
-		t[n].join();
-	}
-
-	cout << tTime.getElapsedTimeInMilliSec() << endl;
-	cout << "Hello,main thread." << endl;
-	getchar();
 	return 0;
 }

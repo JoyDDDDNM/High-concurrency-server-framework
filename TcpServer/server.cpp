@@ -13,23 +13,23 @@
 class MySever : public EasyTcpServer {
 	public:
 		// increase number of received message
-		virtual void OnNetMsg(ChildServer* pChildServer,ClientSocket* clientSock, DataHeader* header) override {
+		void OnNetMsg(ChildServer* pChildServer,ClientSocketPtr& clientSock, DataHeaderPtr header) override {
 			EasyTcpServer::OnNetMsg(pChildServer,clientSock, header);
 
 			switch (header->cmd) {
 				case CMD_LOGIN: {
-					Login* login = (Login*)header;
+					Login* login = (Login*)header.get();
 					//std::cout << "Received message from client: " << allCommands[login->cmd] << " message length: " << login->length << std::endl;
 					//std::cout << "User: " << login->userName << " Password: " << login->password << std::endl;
 
 					// TODO: when user keep sending message to server, server will crash if it try to response to client
-					LoginRet* ret = new LoginRet();
-					pChildServer->addSendTask(clientSock, ret);
+					// auto ret = std::make_shared<LoginRet>();
+					// pChildServer->addSendTask(clientSock, (DataHeaderPtr)ret);
 
 					break;
 				}
 				case CMD_LOGOUT: {
-					Logout* logout = (Logout*)header;
+					Logout* logout = (Logout*)header.get();
 					//std::cout << "Received message from client: " << allCommands[logout->cmd] << " message length: " << logout->length << std::endl;
 					//std::cout << "User: " << logout->userName << std::endl;
 					//// TODO: needs account validation
@@ -39,25 +39,25 @@ class MySever : public EasyTcpServer {
 				}
 				default: {
 					std::cout << "Undefined message received from " << clientSock->getSockfd() << std::endl;
-					header->length = 0;
-					header->cmd = CMD_ERROR;
-					clientSock->sendMessage(header);
+					// header->length = 0;
+					// header->cmd = CMD_ERROR;
+					// clientSock->sendMessage(header);
 					break;
 				}
 			}
 		}
 
-		virtual void OnNetRecv(ClientSocket* clientSock) override {
+		void OnNetRecv(ClientSocketPtr& clientSock) override {
 			EasyTcpServer::OnNetRecv(clientSock);
 		}
 
 		// new client connect server
-		virtual void OnJoin(ClientSocket* clientSock) override {
+		void OnJoin(ClientSocketPtr& clientSock) override {
 			EasyTcpServer::OnJoin(clientSock);
 		}
 
 		// delete the socket of exited client
-		virtual void OnExit(ClientSocket* clientSock) override {
+		void OnExit(ClientSocketPtr& clientSock) override {
 			EasyTcpServer::OnExit(clientSock);
 		}
 	private:

@@ -3,8 +3,9 @@
 
 #include <thread>
 #include <mutex>
-#include <vector>
+#include <list>
 #include <functional>
+#include <memory>
 
 class CellTask {
 	public:
@@ -23,9 +24,9 @@ class CellTask {
 
 class CellTaskServer {
 	public:
-		CellTaskServer() :_tasks{}, _tasksBuf{}, _mutex{}, isRun{ true } {
+		using CellTaskPtr = std::shared_ptr<CellTask>;
 
-		}
+		CellTaskServer() :_tasks{}, _tasksBuf{}, _mutex{}, isRun{ true } {}
 
 		// launch server thread
 		void start() {
@@ -34,7 +35,7 @@ class CellTaskServer {
 			t.detach();
 		}
 
-		void addTask(CellTask* task) {
+		void addTask(CellTaskPtr& task) {
 			if (!isRun) {
 				return;
 			}
@@ -43,9 +44,7 @@ class CellTaskServer {
 			_tasksBuf.push_back(task);
 		}
 		
-		~CellTaskServer() {
-
-		}
+		~CellTaskServer() {}
 
 	protected:
 		void OnRun() {
@@ -71,7 +70,6 @@ class CellTaskServer {
 
 				for (auto task : _tasks) {
 					task->doTask();
-					delete task;
 				}
 
 				_tasks.clear();
@@ -80,9 +78,9 @@ class CellTaskServer {
 
 	private:
 		// 
-		std::vector<CellTask*> _tasks; 
+		std::list<CellTaskPtr> _tasks;
 
-		std::vector<CellTask*> _tasksBuf;
+		std::list<CellTaskPtr> _tasksBuf;
 
 		std::mutex _mutex;
 		

@@ -36,6 +36,7 @@
 #include <thread>
 #include <atomic>
 #include <map>
+#include <memory>
 
 #include "Message.hpp"
 #include "CELLTimestamp.hpp"
@@ -47,6 +48,14 @@ std::vector<std::string> allCommands = { "CMD_LOGIN",
 										"CMD_LOGOUT_RESULT",
 										"CMD_NEW_USER_JOIN",
 										"CMD_ERROR" };
+
+class ChildServer;
+class ClientSocket;
+
+using ClientSocketPtr = std::shared_ptr<ClientSocket>;
+using ChildServerPtr = std::shared_ptr<ChildServer>;
+using DataHeaderPtr = std::shared_ptr<DataHeader>;
+using LoginRetPtr = std::shared_ptr<LoginRet>;
 
 // client socket info
 class ClientSocket {
@@ -73,11 +82,11 @@ public:
 	} 
 
 	// send messages to clients
-	int sendMessage(DataHeader* header) {
+	int sendMessage(DataHeaderPtr& header) {
 		int ret = SOCKET_ERROR;
 
 		int nSendLen = header->length;
-		const char* pSendData = (const char*)header;
+		const char* pSendData = (const char*)header.get();
 		
 		while (true) {
 			// reach buffer size limit
@@ -129,18 +138,16 @@ private:
 	int _lastSendPos;
 };
 
-class ChildServer;
-
 // network event interface
 class INetEvent {
 public:
 	INetEvent() = default;
 
 	// client exits server
-	virtual void OnJoin(ClientSocket* clientSock) = 0;
-	virtual void OnExit(ClientSocket* clientSock) = 0;
-	virtual void OnNetMsg(ChildServer* pChildServer, ClientSocket* clientSock, DataHeader* header) = 0;
-	virtual void OnNetRecv(ClientSocket* clientSock) = 0;
+	virtual void OnJoin(ClientSocketPtr& clientSock) = 0;
+	virtual void OnExit(ClientSocketPtr& clientSock) = 0;
+	virtual void OnNetMsg(ChildServer* pChildServer, ClientSocketPtr& clientSock, DataHeaderPtr header) = 0;
+	virtual void OnNetRecv(ClientSocketPtr& clientSock) = 0;
 	~INetEvent() = default;
 
 private:
@@ -150,18 +157,17 @@ private:
 // network message sending service
 class CellSendMsgToClientTask : public CellTask {
 	public:	
-		CellSendMsgToClientTask(ClientSocket* pClient, DataHeader* pHeader) : _pClient{ pClient }, _pHeader{ pHeader } {}
+		CellSendMsgToClientTask(ClientSocketPtr pClient, DataHeaderPtr& pHeader) : _pClient{ pClient }, _pHeader{ pHeader } {}
 
 		virtual void doTask() override {
 			_pClient->sendMessage(_pHeader);
-			delete _pHeader;
 		}
 
 		~CellSendMsgToClientTask() {}
 
 	private:
-		ClientSocket* _pClient;
-		DataHeader* _pHeader;
+		ClientSocketPtr _pClient;
+		DataHeaderPtr _pHeader;
 };
 
 // network message receive service
@@ -176,16 +182,13 @@ class ChildServer {
 
 		// close socket
 		void closeSock() {
-			if (_sock == INVALID_SOCKET) {
-				return;
-			}
+			if (_sock == INVALID_SOCKET) return;
 
 #		ifdef _WIN32
 			// close all client sockets
 			for (auto iter : _clients) {
 				closesocket(iter.second->getSockfd());
 				// TODO: need to check if it is not nullptr and delete successfully
-				delete iter.second;
 			}
 			// terminates use of the Winsock 2 DLL (Ws2_32.dll)
 			closesocket(_sock);
@@ -294,7 +297,7 @@ class ChildServer {
 				}
 
 #				else
-				std::vector<ClientSocket*> temp;
+				std::vector<ClientSocketPtr> temp;
 				for (auto iter : _clients) {
 					if (FD_ISSET(iter.second->getSockfd(), &fdRead)) {
 						if (RecvData(iter.second) == -1) {
@@ -317,7 +320,7 @@ class ChildServer {
 		}
 
 		// receive client message, solve message concatenation
-		int RecvData(ClientSocket* client) {
+		int RecvData(ClientSocketPtr& client) {
 			// 5. keeping reading message from clients
 			// we only read header info from the incoming message
 			
@@ -344,7 +347,8 @@ class ChildServer {
 			// repeatedly process the incoming message, which solve packet concatenation
 
 			while (client->getOffset() >= sizeof(DataHeader)) {
-				DataHeader* header = (DataHeader*)client->getMsgBuf();
+				DataHeader* ptr = (DataHeader*)client->getMsgBuf();
+				DataHeaderPtr header = std::make_shared<DataHeader>(*ptr);
 
 				// receive a full message including data header
 				if (client->getOffset() >= header->length) {
@@ -372,13 +376,13 @@ class ChildServer {
 
 		// response client message, there can be different ways of processing messages in different kinds of server
 		// we use virutal to for inheritance
-		virtual void OnNetMsg(ClientSocket* client, DataHeader* header) {
+		virtual void OnNetMsg(ClientSocketPtr client, DataHeaderPtr header) {
 			// increase the count of received message
 			_pNetEvent->OnNetMsg(this, client, header);
 		}
 	
 		// add client from main thread into the buffer queue of child thread
-		void addClient(ClientSocket* client) {
+		void addClient(ClientSocketPtr client) {
 			std::lock_guard<std::mutex> lock(_mutex);
 			_clients_Buffer.push_back(client);
 		}
@@ -401,14 +405,19 @@ class ChildServer {
 			_pNetEvent = event;
 		}
 
-		void addSendTask(ClientSocket* clientSock, DataHeader* header) {
-			CellSendMsgToClientTask* task = new CellSendMsgToClientTask(clientSock, header);
+		using CellTaskPtr = std::shared_ptr<CellTask>;
+		using CellSendMsgToClientTaskptr = std::shared_ptr<CellSendMsgToClientTask>;
+
+		void addSendTask(ClientSocketPtr clientSock, DataHeaderPtr header) {
+			CellTaskPtr task = std::make_shared<CellSendMsgToClientTask>(clientSock, header);
+				
 			_taskServer.addTask(task);
 		}
 
 
 		~ChildServer() {
 			closeSock();
+			_sock = INVALID_SOCKET;
 		}
 
 	private:
@@ -418,10 +427,10 @@ class ChildServer {
 		// all client sockets connected with server, 
 		// we allocate its memory on heap to avoid stack overflow
 		// since each size of object is large
-		std::map<SOCKET, ClientSocket*> _clients;
+		std::map<SOCKET, ClientSocketPtr> _clients;
 
 		// buffer queue to store clients sent from main thread
-		std::vector<ClientSocket*> _clients_Buffer;
+		std::vector<ClientSocketPtr> _clients_Buffer;
 
 		// mutex for accessing buffer queue
 		std::mutex _mutex;
@@ -449,6 +458,7 @@ class ChildServer {
 class EasyTcpServer : public INetEvent
 {
 public:
+
 	EasyTcpServer() :_sock{ INVALID_SOCKET }, _clients_list{}, _time{}, _recvCount{ 0 }, _msgCount{ 0 }, _clientCount { 0 }, _child_servers{} {}
 
 	// initialize server socket
@@ -472,7 +482,7 @@ public:
 			closeSock();
 		}
 
-		// 1. build socket
+		// 1. create socket
 		_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 		if (INVALID_SOCKET == _sock) {
 			std::cout << "Socket create failed" << std::endl;
@@ -569,35 +579,18 @@ public:
 		}
 		else {
 			// send message to all client that there is an new client connected to server
-			NewUserJoin client;
-			client.cSocket = cSock; 
+			// NewUserJoin client;
+			// client.cSocket = cSock; 
 			//broadcastMessage(&client);
 
-			ClientSocket* newCLient = new ClientSocket(cSock);
-
-			if (newCLient == nullptr) {
-				std::cout << "ERROR: CLient socket create failed" << std::endl;
-
-#				ifdef _WIN32
-				// close server socket
-				closesocket(cSock);
-#				else
-				close(cSock);
-#				endif
-
-				return INVALID_SOCKET;
-			}
-
 			// choose a child server which has least clients
-			addClientToChild(newCLient);
+			addClientToChild(std::make_shared<ClientSocket>(cSock));
 		}
 
 		return cSock;
 	}
 
-	void addClientToChild(ClientSocket* client) {
-		OnJoin(client);
-		
+	void addClientToChild(ClientSocketPtr client) {
 		// Least connection method to assign client to one of the child server
 		auto minClientServer = _child_servers[0];
 
@@ -608,13 +601,12 @@ public:
 		} 
 
 		minClientServer->addClient(client); 
+		OnJoin(client);
 	}
 
 	// listen client message
 	bool onRun() {
-		if (!isRun()) {
-			return false;
-		}
+		if (!isRun()) return false;
 
 		recvMsgRate();
 
@@ -678,7 +670,7 @@ public:
 		}
 
 		for (int n = 0; n < childCount; n++) {
-			auto cServer = new ChildServer(_sock);
+			auto cServer = std::make_shared<ChildServer>(_sock);
 			_child_servers.push_back(cServer);
 			cServer->setMainServer(this);
 			cServer->start();
@@ -693,21 +685,11 @@ public:
 		}
 
 #		ifdef _WIN32
-		// close all client sockets
-		for (int n = 0; n < (int)_clients_list.size(); n++) {
-			closesocket(_clients_list[n]->getSockfd());
-			// TODO: need to check if it is not nullptr and delete successfully
-			delete _clients_list[n];
-		}
 		// close server socket
 		closesocket(_sock);
 		// terminates use of the Winsock 2 DLL (Ws2_32.dll)
 		WSACleanup();
 #		else
-		for (int n = 0; n < (int)_clients_list.size(); n++) {
-			close(_clients_list[n]->getSockfd());
-			delete _clients_list[n];
-		}
 		close(_sock);
 #		endif
 
@@ -736,40 +718,40 @@ public:
 	}
 
 	// send message to client
-	int sendMessage(SOCKET cSock, DataHeader* header) {
-		if (isRun() && header) {
-			return send(cSock, (const char*)header, header->length, 0);
-		}
+	//int sendMessage(SOCKET cSock, DataHeader* header) {
+	//	if (isRun() && header) {
+	//		return send(cSock, (const char*)header, header->length, 0);
+	//	}
 
-		return SOCKET_ERROR;
-	}
+	//	return SOCKET_ERROR;
+	//}
 
-	// broadcast message to all users in server
-	void broadcastMessage(DataHeader* header) {
-		if (isRun() && header) {
-			for (int n = (int)_clients_list.size() - 1; n >= 0; n--) {
-				sendMessage(_clients_list[n]->getSockfd(), header);
-			}
-		}
-	}
+	//// broadcast message to all users in server
+	//void broadcastMessage(DataHeader* header) {
+	//	if (isRun() && header) {
+	//		for (int n = (int)_clients_list.size() - 1; n >= 0; n--) {
+	//			sendMessage(_clients_list[n]->getSockfd(), header);
+	//		}
+	//	}
+	//}
 
 	// increase number of received packages
-	virtual void OnNetMsg(ChildServer* pChildServer,ClientSocket* clientSock, DataHeader* header) override {
+	virtual void OnNetMsg(ChildServer* pChildServer,ClientSocketPtr& clientSock, DataHeaderPtr header) override {
 		_msgCount++;
 	}
 
-	virtual void OnNetRecv(ClientSocket* clientSock) override {
+	virtual void OnNetRecv(ClientSocketPtr& clientSock) override {
 		_recvCount++;
 	}
 
 	// new client connect server
-	virtual void OnJoin(ClientSocket* clientSock) override {
+	virtual void OnJoin(ClientSocketPtr& clientSock) override {
 		_clients_list.push_back(clientSock);
 		_clientCount++;
 	}
 
 	// delete the socket of exited client
-	virtual void OnExit(ClientSocket* clientSock) override {
+	virtual void OnExit(ClientSocketPtr& clientSock) override {
 		auto iter = _clients_list.end();
 
 		for (int n = (int)_clients_list.size() - 1; n >= 0; n--) {
@@ -798,14 +780,14 @@ protected:
 	std::atomic<int> _msgCount;
 
 	// all client sockets connected with server, this clients list can be used for message broadcast
-	std::vector<ClientSocket*> _clients_list;
+	std::vector<ClientSocketPtr> _clients_list;
 
 private:
 	// server socket
 	SOCKET _sock;
 
-	// child threads to process client messages
-	std::vector<ChildServer*> _child_servers;
+	// child server to process client messages
+	std::vector<ChildServerPtr> _child_servers;
 
 	CELLTimestamp _time;
 };

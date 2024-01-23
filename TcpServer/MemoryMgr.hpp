@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <iostream>
+#include <mutex>
 
 // maximum size of each memory block
 #define MAX_MEMORY_SIZE 128
@@ -62,6 +63,8 @@ class MemoryPool {
 
 		// request memroy and return it to manager
 		void* allocMem(size_t nSize) {
+			std::lock_guard<std::mutex> lock(_mutex);
+
 			if (!_pBuf) initMemory();
 
 			MemoryBlock* pRet{ nullptr };
@@ -82,16 +85,18 @@ class MemoryPool {
 			}
 
 			xPrintf("allocMem: %llx, id=%d, size=%d \n", pRet, pRet->nID, nSize);
-			// reset pointer to skip header
+			// reset pointer to skip 
 			return ((char*)pRet + sizeof(MemoryBlock));
 		}
 
 		// free memory
 		void freeMem(void* pMem) {
+			std::lock_guard<std::mutex> lock(_mutex);
+
 			// pointer to the header of memory block
 			MemoryBlock* pBlock = (MemoryBlock*)((char*)pMem - sizeof(MemoryBlock));
 
-			assert(pBlock->nRef == 1);
+			//assert(pBlock->nRef == 1);
 
 			if (pBlock->nRef-- > 1) {
 				// memory block is accessed by more than 1 server
@@ -162,6 +167,7 @@ class MemoryPool {
 		// number of blocks in pool
 		size_t _nBlock;
 
+		std::mutex _mutex;
 };
 
 // memory manager
@@ -228,7 +234,7 @@ class MemoryMgr {
 		// avoid user access manager directly
 		static MemoryMgr mgr;
 		
-		// MemoryPool _pool64;
+		MemoryPool _pool64;
 		MemoryPool _pool128;
 		// MemoryPool _pool256;
 		// MemoryPool _pool512;
@@ -238,10 +244,10 @@ class MemoryMgr {
 		MemoryPool* _szAlloc[MAX_MEMORY_SIZE + 1]; 
 
 		// stop user trying to initialize manager
-		MemoryMgr() : _pool128{ 128, 1000000 } {
-			//init(0, 64, &_pool64);
-			//init(65, 128, &_pool128);
-			init(0, 128, &_pool128);
+		MemoryMgr() : _pool64{64, 4000000 }, _pool128{ 128, 2000000 } {
+			init(0, 64, &_pool64);
+			init(65, 128, &_pool128);
+			//init(0, 128, &_pool128);
 			//init(129, 256, &_pool256);
 			//init(257, 512, &_pool512);
 			//init(512, 1024, &_pool1024);

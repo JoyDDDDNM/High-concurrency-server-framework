@@ -51,9 +51,11 @@ void childThread(int id) {
 	strcpy(login.userName, "account");
 	strcpy(login.password, "password");
 
+	//CELLTimestamp timer;
+
 	while (isRun) { 
-		for (int n = begin; n < end; n++) {
-			// keep sending message to server for pressure test
+		for (int n = begin; n < end; n++) {	
+			// keep sending message to server 
 			if (clients[n]->sendMessage(&login, sizeof(login)) != SOCKET_ERROR) {
 				sendCount++;
 			};
