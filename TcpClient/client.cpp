@@ -14,8 +14,8 @@
 // number of threads
 const int tCount = 4;
 
-// number of clients per thread
-const int cCount = 1000;
+// total number of clients 
+const int cCount = 10000;
 
 // clients array, it needs to be global so that each client in child thread can access it
 EasyTcpClient* clients[cCount];

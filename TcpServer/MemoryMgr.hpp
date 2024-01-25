@@ -6,7 +6,7 @@
 #include <mutex>
 
 // maximum size of each memory block
-#define MAX_MEMORY_SIZE 128
+#define MAX_MEMORY_SIZE 1024
 
 // DEBUG print
 #ifdef _DEBUG
@@ -91,13 +91,13 @@ class MemoryPool {
 
 		// free memory
 		void freeMem(void* pMem) {
-			std::lock_guard<std::mutex> lock(_mutex);
 
 			// pointer to the header of memory block
 			MemoryBlock* pBlock = (MemoryBlock*)((char*)pMem - sizeof(MemoryBlock));
 
 			//assert(pBlock->nRef == 1);
 
+			std::lock_guard<std::mutex> lock(_mutex);
 			if (pBlock->nRef-- > 1) {
 				// memory block is accessed by more than 1 server
 				return;
@@ -105,11 +105,8 @@ class MemoryPool {
 			
 			if (pBlock->bPool) {
 				// set the current block as the first block to be used next time, manage memory pool as linklist
-
 				pBlock->pNext = _pHeader;
 				_pHeader = pBlock; 
-
-				// problem: when pHeader points to nullptr
 			} else {
 				// an extra memory not existing in memory pool
 				free(pBlock);
@@ -236,21 +233,27 @@ class MemoryMgr {
 		
 		MemoryPool _pool64;
 		MemoryPool _pool128;
-		// MemoryPool _pool256;
-		// MemoryPool _pool512;
-		// MemoryPool _pool1024;
+		MemoryPool _pool256;
+		MemoryPool _pool512;
+		MemoryPool _pool1024;
 		 
 		// used to access the corresponding memory pool when request memory
 		MemoryPool* _szAlloc[MAX_MEMORY_SIZE + 1]; 
 
 		// stop user trying to initialize manager
-		MemoryMgr() : _pool64{64, 4000000 }, _pool128{ 128, 2000000 } {
+		MemoryMgr() : _pool64{64, 100000 }, 
+					_pool128{ 128, 100000 }, 
+					_pool256{ 256, 100000 },
+					_pool512{ 512, 100000 },
+					_pool1024{ 1024, 100000 } {
+
+			// when adjust max pool size, needs to redefine MAX_MEMORY_SIZE
 			init(0, 64, &_pool64);
 			init(65, 128, &_pool128);
-			//init(0, 128, &_pool128);
-			//init(129, 256, &_pool256);
-			//init(257, 512, &_pool512);
-			//init(512, 1024, &_pool1024);
+			init(0, 128, &_pool128);
+			init(129, 256, &_pool256);
+			init(257, 512, &_pool512);
+			init(512, 1024, &_pool1024);
 		};
 
 		~MemoryMgr() {};

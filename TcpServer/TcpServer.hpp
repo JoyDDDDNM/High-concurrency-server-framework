@@ -38,6 +38,7 @@
 #include <map>
 #include <memory>
 
+#include "ObjectPool.hpp"
 #include "Message.hpp"
 #include "CELLTimestamp.hpp"
 #include "CELLTask.hpp"
@@ -57,85 +58,85 @@ using ChildServerPtr = std::shared_ptr<ChildServer>;
 using DataHeaderPtr = std::shared_ptr<DataHeader>;
 using LoginRetPtr = std::shared_ptr<LoginRet>;
 
-// client socket info
-class ClientSocket {
-public:
-	ClientSocket(SOCKET sockfd = INVALID_SOCKET) :_sockfd{ sockfd }, _szMsgBuf{ {} }, _offset{ 0 }, _lastSendPos{ 0 } {
-		memset(_szMsgBuf, 0, RECV_BUFF_SIZE);
-		memset(_szSendBuf, 0, SEND_BUFF_SIZE);
-	}
-
-	SOCKET getSockfd() {
-		return _sockfd; 
-	}
-
-	char* getMsgBuf() {
-		return _szMsgBuf;
-	}
-
-	int getOffset() {
-		return _offset; 
-	}
-
-	void setOffset(int pos) {
-		_offset = pos;
-	} 
-
-	// send messages to clients
-	int sendMessage(DataHeaderPtr& header) {
-		int ret = SOCKET_ERROR;
-
-		int nSendLen = header->length;
-		const char* pSendData = (const char*)header.get();
-		
-		while (true) {
-			// reach buffer size limit
-			if (_lastSendPos + nSendLen >= SEND_BUFF_SIZE) {
-				// count number of messages we can send
-				int nCopyLen = SEND_BUFF_SIZE - _lastSendPos;
-			
-				// only copy certain amount of next message to fill the buffer
-				memcpy(_szSendBuf + _lastSendPos, pSendData, nCopyLen);
-				
-				// increase pointer 
-				pSendData += nCopyLen;
-
-				// decrease len of next message to be copied into buffer
-				nSendLen -= nCopyLen;
-
-				// send messages when receive large enough messages
-				ret = send(_sockfd, _szSendBuf, SEND_BUFF_SIZE, 0);
-
-				// reset offset
-				_lastSendPos = 0;
-
-				if (ret == SOCKET_ERROR) return ret;
-			}
-			else {
-				memcpy(_szSendBuf + _lastSendPos, pSendData, nSendLen);
-				_lastSendPos += nSendLen;
-				break;
-			}
+// client socket info, we can accept up to 10_000 clients at the same time
+class ClientSocket : public ObjectPoolBase<ClientSocket, 10000>{
+	public:
+		ClientSocket(SOCKET sockfd = INVALID_SOCKET) :_sockfd{ sockfd }, _szMsgBuf{ {} }, _offset{ 0 }, _lastSendPos{ 0 } {
+			memset(_szMsgBuf, 0, RECV_BUFF_SIZE);
+			memset(_szSendBuf, 0, SEND_BUFF_SIZE);
 		}
 
-		return ret;
-	}
+		SOCKET getSockfd() {
+			return _sockfd; 
+		}
 
-private:
-	// socket fd, which will be put into selcet function
-	SOCKET _sockfd;
+		char* getMsgBuf() {
+			return _szMsgBuf;
+		}
 
-	// buffer which stores data after we receive it from the buffer inside OS kernel
-	char _szMsgBuf[RECV_BUFF_SIZE];
+		int getOffset() {
+			return _offset; 
+		}
 
-	// offset pointer pointing to the end of messages received from _szRecv
-	int _offset;
+		void setOffset(int pos) {
+			_offset = pos;
+		} 
 
-	// buffer which stores messages which would be sent to clients later
-	char _szSendBuf[SEND_BUFF_SIZE];
+		// send messages to clients
+		int sendMessage(DataHeaderPtr& header) {
+			int ret = SOCKET_ERROR;
+
+			int nSendLen = header->length;
+			const char* pSendData = (const char*)header.get();
+		
+			while (true) {
+				// reach buffer size limit
+				if (_lastSendPos + nSendLen >= SEND_BUFF_SIZE) {
+					// count number of messages we can send
+					int nCopyLen = SEND_BUFF_SIZE - _lastSendPos;
+			
+					// only copy certain amount of next message to fill the buffer
+					memcpy(_szSendBuf + _lastSendPos, pSendData, nCopyLen);
+				
+					// increase pointer 
+					pSendData += nCopyLen;
+
+					// decrease len of next message to be copied into buffer
+					nSendLen -= nCopyLen;
+
+					// send messages when receive large enough messages
+					ret = send(_sockfd, _szSendBuf, SEND_BUFF_SIZE, 0);
+
+					// reset offset
+					_lastSendPos = 0;
+
+					if (ret == SOCKET_ERROR) return ret;
+				}
+				else {
+					memcpy(_szSendBuf + _lastSendPos, pSendData, nSendLen);
+					_lastSendPos += nSendLen;
+					break;
+				}
+			}
+
+			return ret;
+		}
+
+	private:
+		// socket fd, which will be put into selcet function
+		SOCKET _sockfd;
+
+		// buffer which stores data after we receive it from the buffer inside OS kernel
+		char _szMsgBuf[RECV_BUFF_SIZE];
+
+		// offset pointer pointing to the end of messages received from _szRecv
+		int _offset;
+
+		// buffer which stores messages which would be sent to clients later
+		char _szSendBuf[SEND_BUFF_SIZE];
 	
-	// offset pointers pointing to the end end of messages received from _szSendBuf
-	int _lastSendPos;
+		// offset pointers pointing to the end end of messages received from _szSendBuf
+		int _lastSendPos;
 };
 
 // network event interface
@@ -584,7 +585,10 @@ public:
 			//broadcastMessage(&client);
 
 			// choose a child server which has least clients
-			addClientToChild(std::make_shared<ClientSocket>(cSock));
+			// call the overload new to request memory
+			ClientSocketPtr c(new ClientSocket(cSock));
+			// addClientToChild(std::make_shared<ClientSocket>(cSock));
+			addClientToChild(c);
 		}
 
 		return cSock;
@@ -718,22 +722,22 @@ public:
 	}
 
 	// send message to client
-	//int sendMessage(SOCKET cSock, DataHeader* header) {
-	//	if (isRun() && header) {
-	//		return send(cSock, (const char*)header, header->length, 0);
-	//	}
+	int sendMessage(SOCKET cSock, DataHeader* header) {
+		if (isRun() && header) {
+			return send(cSock, (const char*)header, header->length, 0);
+		}
 
-	//	return SOCKET_ERROR;
-	//}
+		return SOCKET_ERROR;
+	}
 
-	//// broadcast message to all users in server
-	//void broadcastMessage(DataHeader* header) {
-	//	if (isRun() && header) {
-	//		for (int n = (int)_clients_list.size() - 1; n >= 0; n--) {
-	//			sendMessage(_clients_list[n]->getSockfd(), header);
-	//		}
-	//	}
-	//}
+	// broadcast message to all users in server
+	void broadcastMessage(DataHeader* header) {
+		if (isRun() && header) {
+			for (int n = (int)_clients_list.size() - 1; n >= 0; n--) {
+				sendMessage(_clients_list[n]->getSockfd(), header);
+			}
+		}
+	}
 
 	// increase number of received packages
 	virtual void OnNetMsg(ChildServer* pChildServer,ClientSocketPtr& clientSock, DataHeaderPtr header) override {
