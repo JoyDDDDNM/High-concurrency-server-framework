@@ -9,11 +9,15 @@
 
 #include "Alloc.hpp"
 #include "TcpServer.hpp"
+#include "ObjectPool.hpp"
+#include "Client.hpp"
+
+#include <functional>
 
 class MySever : public EasyTcpServer {
 	public:
 		// increase number of received message
-		void OnNetMsg(ChildServer* pChildServer,ClientSocketPtr& clientSock, DataHeaderPtr header) override {
+		void OnNetMsg(ChildServer* pChildServer,ClientPtr& clientSock, DataHeaderPtr header) override {
 			EasyTcpServer::OnNetMsg(pChildServer,clientSock, header);
 
 			switch (header->cmd) {
@@ -47,17 +51,17 @@ class MySever : public EasyTcpServer {
 			}
 		}
 
-		void OnNetRecv(ClientSocketPtr& clientSock) override {
+		void OnNetRecv(ClientPtr& clientSock) override {
 			EasyTcpServer::OnNetRecv(clientSock);
 		}
 
 		// new client connect server
-		void OnJoin(ClientSocketPtr& clientSock) override {
+		void OnJoin(ClientPtr& clientSock) override {
 			EasyTcpServer::OnJoin(clientSock);
 		}
 
 		// delete the socket of exited client
-		void OnExit(ClientSocketPtr& clientSock) override {
+		void OnExit(ClientPtr& clientSock) override {
 			EasyTcpServer::OnExit(clientSock);
 		}
 	private:
@@ -74,12 +78,13 @@ int main() {
     server.listenNumber(5);
 	 
     server.Start(4);
-
+	
     // create an thread for reading server input
-    std::thread serverCmdThread(cmdThread);
+    std::thread serverCmdThread(std::bind(cmdThread, std::ref(server)));
+
     serverCmdThread.detach();
 
-    while (isRun) {
+    while (server.isRun()){
         server.onRun();
     }
 

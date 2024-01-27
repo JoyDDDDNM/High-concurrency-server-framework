@@ -1,23 +1,21 @@
 #ifndef _CELL_TASK_H_
 #define _CELL_TASK_H_
 
+#include "Client.hpp"
+
 #include <thread>
 #include <mutex>
 #include <list>
-#include <functional>
 #include <memory>
 
 class CellTask {
 	public:
-		CellTask() {
-		
-		};
+		CellTask();
 
-		virtual void doTask() {
-					
-		}
+		virtual void doTask() = 0;
 
-		virtual ~CellTask() {};
+		virtual ~CellTask();
+
 	private:
 
 };
@@ -26,55 +24,17 @@ class CellTaskServer {
 	public:
 		using CellTaskPtr = std::shared_ptr<CellTask>;
 
-		CellTaskServer() :_tasks{}, _tasksBuf{}, _mutex{}, isRun{ true } {}
+		CellTaskServer();
 
 		// launch server thread
-		void start() {
-			isRun = true;
-			std::thread t(std::mem_fn(&CellTaskServer::OnRun), this);
-			t.detach();
-		}
+		void start();
 
-		void addTask(CellTaskPtr& task) {
-			if (!isRun) {
-				return;
-			}
-
-			std::lock_guard<std::mutex> lock(_mutex);
-			_tasksBuf.push_back(task);
-		}
+		void addTask(CellTaskPtr& task);
 		
-		~CellTaskServer() {}
+		~CellTaskServer();
 
 	protected:
-		void OnRun() {
-			if (!isRun) {
-				return;
-			}
-
-			while (true) {
-				// move tasks from buffer to queue
-				if (!_tasksBuf.empty()) {
-					std::lock_guard<std::mutex> lock(_mutex);
-					for (auto task : _tasksBuf) {
-						_tasks.push_back(task);
-					}
-					_tasksBuf.clear();
-				}
-
-				if (_tasks.empty()) {
-					std::chrono::milliseconds t(1);
-					std::this_thread::sleep_for(t);
-					continue;
-				}
-
-				for (auto task : _tasks) {
-					task->doTask();
-				}
-
-				_tasks.clear();
-			}
-		}
+		void OnRun();
 
 	private:
 		// 
@@ -86,6 +46,21 @@ class CellTaskServer {
 		
 		bool isRun;
 };
+
+// network message sending service
+class CellSendMsgToClientTask : public CellTask {
+public:
+	CellSendMsgToClientTask(ClientPtr pClient, DataHeaderPtr& pHeader);
+
+	virtual void doTask() override;
+
+	virtual ~CellSendMsgToClientTask();
+
+private:
+	ClientPtr _pClient;
+	DataHeaderPtr _pHeader;
+};
+
 
 
 #endif

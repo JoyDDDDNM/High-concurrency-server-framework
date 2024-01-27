@@ -1,5 +1,5 @@
-#ifndef _CELLTimestamp_hpp_
-#define _CELLTimestamp_hpp_
+#ifndef _CELL_TIMESTAMP_HPP_
+#define _CELL_TIMESTAMP_HPP_
 
 //#include <windows.h>
 #include<chrono>
@@ -14,6 +14,7 @@ public:
         //QueryPerformanceCounter(&_startCount);
 		update();
     }
+
     ~CELLTimestamp()
     {}
 
@@ -59,4 +60,4 @@ protected:
 	time_point<high_resolution_clock> _begin;
 };
 
-#endif // !_CELLTimestamp_hpp_
+#endif // !_CELL_TIMESTAMP_HPP_
