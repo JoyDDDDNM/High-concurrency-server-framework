@@ -8,6 +8,8 @@ It is implemented by rewriting the select system call. This framework is capable
 
 Windows 10 Pro
 
+Visual Studio 2022
+
 g++ 11.2.0
 
 # Technical points
